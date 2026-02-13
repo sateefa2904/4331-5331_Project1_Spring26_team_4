@@ -367,7 +367,40 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			IOException
 
 	{
-		// [ASantra: 1/22/2026] Write your code here
+		    // [WMorokoshi: 2/13/2026]
+		    if (headerPage.get_keyType() != AttrType.attrInteger) {
+		        throw new KeyNotMatchException(null, "Key type must be attrInteger");
+		    }
+		    
+		    if (headerPage.get_rootId().pid == INVALID_PAGE) {
+		        BTLeafPage newRootPage = new BTLeafPage(headerPage.get_keyType());
+		        PageId newRootPageId = newRootPage.getCurPage();
+		        
+		        newRootPage.setNextPage(new PageId(INVALID_PAGE));
+		        newRootPage.setPrevPage(new PageId(INVALID_PAGE));
+		        
+		        newRootPage.insertRecord(key, rid);
+		        
+		        unpinPage(newRootPageId, true);
+		        
+		        updateHeader(newRootPageId);
+		        
+		    } else {
+		        KeyDataEntry newRootEntry = _insert(key, rid, headerPage.get_rootId());
+		        
+		        if (newRootEntry != null) {
+		            BTIndexPage newRoot = new BTIndexPage(headerPage.get_keyType());
+		            PageId newRootPageId = newRoot.getCurPage();
+		            
+		            newRoot.setPrevPage(headerPage.get_rootId());
+		            newRoot.insertKey(newRootEntry.key, 
+		                            ((IndexData)newRootEntry.data).getData());
+		            
+		            unpinPage(newRootPageId, true);
+		            
+		            updateHeader(newRootPageId);
+		        }
+		    }
 	}
 
 	private KeyDataEntry _insert(KeyClass key, RID rid, PageId currentPageId)
