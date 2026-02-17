@@ -451,8 +451,77 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			// otherwise index page is full and split index page and return separator upward
 
 
+			//splitting the index page
+			java.util.ArrayList<KeyClass> keys = new java.util.ArrayList<>();
+			java.util.ArrayList<PageId> ptrs = new java.util.ArrayList<>();
+
+			//ptrs[0] = P0 (lefmostchild pointer)
+			ptrs.add(indexPage.getPrevPage());
+
+			//collect existing (Ki, Pi) pairs in sorted order
+			RID ridIter = new RID();
+			KeyDataEntry cur = indexPage.getFirst(ridIter);
+			java.util.ArrayList<RID> slotRids = new java.util.ArrayList<>();
+
+			while(cur != null) {
+				slotRids.add(new RID(ridIter.pageNo, ridIter.slotNo));
+				keys.add(curr.key);
+				ptrs.add(((IndexData) cur.data), getData()); //this will be the Pi
+				cur = indexPage.getNext(ridIter);
+			}
+
+			//insert childUp(sepKey, newRightChild) into temporary arrays at the correct position
+			KeyClass insKey = childUp.key;
+			PageId insPtr = ((IndexData) childUp.data).getData();
+
+			int pos = 0;
+			//my goal is to try to have a stable order with the duplicates (if we have any) so i will insert it AFTER all the keys <= insKey
+			while(pos < keys.size() && BT.keyCompare(insKey, keys.get(pos)) >= 0){
+				pos++;
+			}
+			keys.add(pos,insPtr);
+
+			//ptrs have one more elements that keys. insPtr is the the ptr to the RIGHT of insKey, so it should be poiting at index(pos+1)
+			ptrs.add(pos+1, insPtr);
+
+			//decide split point (lef gets first half, right gets the second half)
+			int totalKeys = keys.size();
+			int leftCount = totalKeys/2; //keep the floor half on left
+			//right starts at leftCount
+			KeyClass sepKey = keys.get(leftCount);
+
+			//create new right index page
+			BTIndexPage newIndex = new BTIndexPage(headerPage.get_keyType());
+			PageId newIndexId = newIndex.getCurPage();
+
+			//right page P0 must be ptr[leftCount]
+			newIndex.setPrevPage(ptrs.get(leftCount));
+
+			//remove all existing entries from the old index page (we will rebuild it)
+			for (RID r : slotRids){
+				indexPage.deleteSortedRecord(r);
+			}
+
+			//rebuild LEFT page
+			indexPage.setPrevPage(ptrs.get(0));
+			for(int i = 0; i<leftCount; i++){
+				indexPage.insertKey(keys.get(i), ptrs.get(i+1));
+			}
+
+			//build RIGHT page
+			for (int i = leftCount; i<totalKeys; i++) {
+				newIndex.insertKey(keys.get(i), ptrs.get(i+1));
+			}
+
+			//unpin both pages dirty
+			unpinPage(currentPageId, true);
+			unpinPage(newIndexId, true);
+
+			//return separator upward: (smartest key on new right, pointer to new right)
+			return new KeyDataEntry(sepKey, newIndexId);
+
 		} else if (currentPage.getType() == NodeType.LEAF){
-			//TODO: leaf-case
+			
 		} else {
 			unpinPage(currentPageId);
 			throw new InsertException(null, "Unknown page type in _insert()");
@@ -672,8 +741,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			throws LeafDeleteException, KeyNotMatchException, PinPageException,
 			ConstructPageException, IOException, UnpinPageException,
 			PinPageException, IndexSearchException, IteratorException {
-            
-            // [ASantra: 1/22/2026]
+        // [EMunoz: 2/12/2026]
 		// first checks to see if the tree is empty
     	if (headerPage.get_rootId().pid == INVALID_PAGE) {
     	    return false;
