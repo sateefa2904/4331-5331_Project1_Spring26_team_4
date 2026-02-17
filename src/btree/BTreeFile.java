@@ -521,6 +521,75 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			return new KeyDataEntry(sepKey, newIndexId);
 
 		} else if (currentPage.getType() == NodeType.LEAF){
+			BTLeafPage leaf = new BTLeafPage(page, headerPage.get_keyType());
+
+			// usual case: leaf has space
+			int needLeaf = BT.getKeyDataLength(key, NodeType.LEAF);
+			if (leaf.available_space() >= needLeaf) {
+				leaf.insertRecord(key, rid);
+				unpinPage(currentPageId, true);
+				return null;
+			}
+
+			// -------------------- SPLIT LEAF PAGE --------------------
+			BTLeafPage newLeaf = new BTLeafPage(headerPage.get_keyType());
+			PageId newLeafId = newLeaf.getCurPage();
+
+			// link siblings: current <-> newLeaf <-> oldNext
+			PageId oldNext = leaf.getNextPage();
+			newLeaf.setNextPage(oldNext);
+			newLeaf.setPrevPage(currentPageId);
+
+			leaf.setNextPage(newLeafId);
+			if (oldNext.pid != INVALID_PAGE) {
+				BTLeafPage oldNextLeaf = new BTLeafPage(pinPage(oldNext), headerPage.get_keyType());
+				oldNextLeaf.setPrevPage(newLeafId);
+				unpinPage(oldNext, true);
+			}
+
+			// move second half of entries to newLeaf
+			int total = leaf.numberOfRecords();
+			int keep = total / 2;
+
+			RID itRid = new RID();
+			KeyDataEntry entry = leaf.getFirst(itRid);
+
+			java.util.ArrayList<RID> moveSlots = new java.util.ArrayList<>();
+			java.util.ArrayList<KeyDataEntry> moveEntries = new java.util.ArrayList<>();
+
+			int idx = 0;
+			while (entry != null) {
+				if (idx >= keep) {
+					moveSlots.add(new RID(itRid.pageNo, itRid.slotNo));
+					moveEntries.add(entry);
+				}
+				idx++;
+				entry = leaf.getNext(itRid);
+			}
+
+			// perform move: insert into newLeaf, delete from old leaf
+			for (int i = 0; i < moveEntries.size(); i++) {
+				KeyDataEntry me = moveEntries.get(i);
+				RID userRid = ((LeafData) me.data).getData();
+				newLeaf.insertRecord(me.key, userRid);
+				leaf.deleteSortedRecord(moveSlots.get(i));
+			}
+
+			// now insert the new (key,rid) into correct side (split-first policy A)
+			KeyDataEntry firstRight = newLeaf.getFirst(new RID());
+			KeyClass splitKey = firstRight.key;
+
+			if (BT.keyCompare(key, splitKey) >= 0) {
+				newLeaf.insertRecord(key, rid);
+			} else {
+				leaf.insertRecord(key, rid);
+			}
+
+			// return separator: (smallest key in new right leaf, pointer to new right leaf)
+			unpinPage(currentPageId, true);
+			unpinPage(newLeafId, true);
+			return new KeyDataEntry(splitKey, newLeafId);
+
 			
 		} else {
 			unpinPage(currentPageId);
