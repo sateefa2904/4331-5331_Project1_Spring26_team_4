@@ -832,17 +832,17 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 
     	        int cmpKeys = BT.keyCompare(entry.key, key);
 
-    	        //if keys are equal, check the RID
+				//if keys are equal, check the RID
     	        if (cmpKeys == 0) {
     	            RID entryRid = ((LeafData) entry.data).getData();
 
     	            if (entryRid.equals(rid)) {
     	                //found exact match — delete it
-    	                leafPage.delUserRid(key, rid);
-
-    	                // make page dirty
-    	                unpinPage(currentPageId, true);
-    	                return true;
+    	                
+						if (leafPage.delEntry(entry)) { //changed
+							unpinPage(currentPageId, true);
+							return true;
+						}
     	            }
     	        }
 
