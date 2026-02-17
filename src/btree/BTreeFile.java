@@ -409,10 +409,55 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			IndexSearchException, UnpinPageException, LeafInsertRecException,
 			ConvertException, IteratorException, IndexInsertRecException,
 			KeyNotMatchException, NodeNotMatchException, InsertException
-
 	{
-		// [ASantra: 1/22/2026] Remove the return statement and start your code.
-		return null;
+		// [SAteefa: 2/12/2026]
+		Page page = pinPage(currentPageId);
+		BTSortedPage currentPage = new BTSortedPage(page, headerPage.get_keyType());
+
+		KeyDataEntry upEntry = null; //what is returned upward only if the split happens
+
+		if(currentPage.getType() == NodeType.INDEX){
+			BTIndexPage indexPage = new BTIndexPage(page, headerPage.get_keyType());
+
+			RID scanRid = new RID();
+			KeyDataEntry e = indexPage.getFirst(scanRid);
+
+			//start with the leftmost child pointer (p0)
+			PageId child = indexPage.getPrevPage();
+
+			//walk separator keys from left to right
+			//if the key >= separator, go right (update child to the entry's pointer)
+			while(e!= null && BT.keyCompare(key, e.key) >= 0) {
+				child = ((IndexData) e.data).getData();
+				e = indexPage.getNext(scanRid);
+			}
+
+			KeyDataEntry childUp = _insert(key, rid, child);
+
+			//if child did not split, we are done at this level
+			if(childUp == null){
+				unpinPage(currentPageId);
+				return null;
+			}
+
+			PageId newRightChild = ((IndexData) childUp.data).getData();
+			int need = BT.getKeyDataLength(childUp.key, NodeType.INDEX);
+			if(indexPage.available_space() >= need)
+			{
+				indexPage.insertKey(childUp.key, newRightChild);
+				unpinPage(currentPageId, true); //dirty because we inserted into index page so function would have to not only read but write to memory also
+				return null; //after we handle the split, nothing else is needed so we set new child ptr to null
+			}
+			// otherwise index page is full and split index page and return separator upward
+
+
+		} else if (currentPage.getType() == NodeType.LEAF){
+			//TODO: leaf-case
+		} else {
+			unpinPage(currentPageId);
+			throw new InsertException(null, "Unknown page type in _insert()");
+		}
+		
 	}
 
 	
@@ -628,9 +673,66 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			ConstructPageException, IOException, UnpinPageException,
 			PinPageException, IndexSearchException, IteratorException {
             
-            // [ASantra: 1/22/2026] Remove the return statement and start your code.
-			
-            return false;
+            // [ASantra: 1/22/2026]
+		// first checks to see if the tree is empty
+    	if (headerPage.get_rootId().pid == INVALID_PAGE) {
+    	    return false;
+    	}
+
+    	RID currentRID = new RID();
+    	BTLeafPage leafPage = findRunStart(key, currentRID); //finds where the key should starr
+
+    	if (leafPage == null) {
+    	    return false;
+    	}
+
+    	PageId currentPageId = leafPage.getCurPage();
+    	KeyDataEntry entry = leafPage.getFirst(currentRID); //#scan
+
+    	while (leafPage != null) {
+
+    	    while (entry != null) {
+
+    	        int cmpKeys = BT.keyCompare(entry.key, key);
+
+    	        //if keys are equal, check the RID
+    	        if (cmpKeys == 0) {
+    	            RID entryRid = ((LeafData) entry.data).getData();
+
+    	            if (entryRid.equals(rid)) {
+    	                //found exact match — delete it
+    	                leafPage.delUserRid(key, rid);
+
+    	                // make page dirty
+    	                unpinPage(currentPageId, true);
+    	                return true;
+    	            }
+    	        }
+
+    	        //if key in tree is greater, stop searching
+    	        if (cmpKeys > 0) {
+    	            unpinPage(currentPageId, false);
+    	            return false;
+    	        }
+
+    	        entry = leafPage.getNext(currentRID);
+    	    }
+
+    	    //movee to next leaf page
+    	    PageId nextPageId = leafPage.getNextPage();
+    	    unpinPage(currentPageId, false);
+
+    	    if (nextPageId.pid == INVALID_PAGE) {
+    	        return false;
+    	    }
+
+    	    leafPage = new BTLeafPage(pinPage(nextPageId),
+    	                              headerPage.get_keyType());
+    	    currentPageId = nextPageId;
+    	    entry = leafPage.getFirst(currentRID);
+    	}
+
+    	return false;
 	}
 	/**
 	 * create a scan with given keys Cases: (1) lo_key = null, hi_key = null
