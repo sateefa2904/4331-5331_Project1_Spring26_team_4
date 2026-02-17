@@ -465,8 +465,8 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 
 			while(cur != null) {
 				slotRids.add(new RID(ridIter.pageNo, ridIter.slotNo));
-				keys.add(curr.key);
-				ptrs.add(((IndexData) cur.data), getData()); //this will be the Pi
+				keys.add(cur.key);
+				ptrs.add(((IndexData) cur.data).getData()); //this will be the Pi
 				cur = indexPage.getNext(ridIter);
 			}
 
@@ -479,7 +479,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			while(pos < keys.size() && BT.keyCompare(insKey, keys.get(pos)) >= 0){
 				pos++;
 			}
-			keys.add(pos,insPtr);
+			keys.add(pos,insKey);
 
 			//ptrs have one more elements that keys. insPtr is the the ptr to the RIGHT of insKey, so it should be poiting at index(pos+1)
 			ptrs.add(pos+1, insPtr);
@@ -498,8 +498,8 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			newIndex.setPrevPage(ptrs.get(leftCount));
 
 			//remove all existing entries from the old index page (we will rebuild it)
-			for (RID r : slotRids){
-				indexPage.deleteSortedRecord(r);
+			for (int i = slotRids.size() - 1; i >= 0; i--){
+				indexPage.deleteSortedRecord(slotRids.get(i));
 			}
 
 			//rebuild LEFT page
@@ -518,7 +518,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			unpinPage(newIndexId, true);
 
 			//return separator upward: (smartest key on new right, pointer to new right)
-			return new KeyDataEntry(sepKey, newIndexId);
+			return new KeyDataEntry(sepKey, new IndexData(newIndexId));
 
 		} else if (currentPage.getType() == NodeType.LEAF){
 			BTLeafPage leaf = new BTLeafPage(page, headerPage.get_keyType());
