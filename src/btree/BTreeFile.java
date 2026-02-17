@@ -404,199 +404,247 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 	}
 
 	private KeyDataEntry _insert(KeyClass key, RID rid, PageId currentPageId)
-			throws PinPageException, IOException, ConstructPageException,
+	        throws PinPageException, IOException, ConstructPageException,
 			LeafDeleteException, ConstructPageException, DeleteRecException,
 			IndexSearchException, UnpinPageException, LeafInsertRecException,
 			ConvertException, IteratorException, IndexInsertRecException,
-			KeyNotMatchException, NodeNotMatchException, InsertException
+			KeyNotMatchException, NodeNotMatchException, InsertException 
 	{
-		// [SAteefa: 2/12/2026]
-		Page page = pinPage(currentPageId);
-		BTSortedPage currentPage = new BTSortedPage(page, headerPage.get_keyType());
+    BTSortedPage sortedPage =
+            new BTSortedPage(currentPageId, headerPage.get_keyType());
 
-		KeyDataEntry upEntry = null; //what is returned upward only if the split happens
+    /*
+     * ===============================
+     * CASE 1: LEAF
+     * ===============================
+     */
+    if (sortedPage.getType() == NodeType.LEAF) {
 
-		if(currentPage.getType() == NodeType.INDEX){
-			BTIndexPage indexPage = new BTIndexPage(page, headerPage.get_keyType());
+        BTLeafPage leaf =
+                new BTLeafPage(currentPageId, headerPage.get_keyType());
 
-			RID scanRid = new RID();
-			KeyDataEntry e = indexPage.getFirst(scanRid);
+		// Check for duplicate key
+		RID dupRid = new RID();
+		KeyDataEntry scanEntry = leaf.getFirst(dupRid);
 
-			//start with the leftmost child pointer (p0)
-			PageId child = indexPage.getPrevPage();
-
-			//walk separator keys from left to right
-			//if the key >= separator, go right (update child to the entry's pointer)
-			while(e!= null && BT.keyCompare(key, e.key) >= 0) {
-				child = ((IndexData) e.data).getData();
-				e = indexPage.getNext(scanRid);
-			}
-
-			KeyDataEntry childUp = _insert(key, rid, child);
-
-			//if child did not split, we are done at this level
-			if(childUp == null){
-				unpinPage(currentPageId);
+		while (scanEntry != null) {
+			if (BT.keyCompare(scanEntry.key, key) == 0) {
+				// Key already exists — do not insert
 				return null;
 			}
-
-			PageId newRightChild = ((IndexData) childUp.data).getData();
-			int need = BT.getKeyDataLength(childUp.key, NodeType.INDEX);
-			if(indexPage.available_space() >= need)
-			{
-				indexPage.insertKey(childUp.key, newRightChild);
-				unpinPage(currentPageId, true); //dirty because we inserted into index page so function would have to not only read but write to memory also
-				return null; //after we handle the split, nothing else is needed so we set new child ptr to null
-			}
-			// otherwise index page is full and split index page and return separator upward
-
-
-			//splitting the index page
-			java.util.ArrayList<KeyClass> keys = new java.util.ArrayList<>();
-			java.util.ArrayList<PageId> ptrs = new java.util.ArrayList<>();
-
-			//ptrs[0] = P0 (lefmostchild pointer)
-			ptrs.add(indexPage.getPrevPage());
-
-			//collect existing (Ki, Pi) pairs in sorted order
-			RID ridIter = new RID();
-			KeyDataEntry cur = indexPage.getFirst(ridIter);
-			java.util.ArrayList<RID> slotRids = new java.util.ArrayList<>();
-
-			while(cur != null) {
-				slotRids.add(new RID(ridIter.pageNo, ridIter.slotNo));
-				keys.add(cur.key);
-				ptrs.add(((IndexData) cur.data).getData()); //this will be the Pi
-				cur = indexPage.getNext(ridIter);
-			}
-
-			//insert childUp(sepKey, newRightChild) into temporary arrays at the correct position
-			KeyClass insKey = childUp.key;
-			PageId insPtr = ((IndexData) childUp.data).getData();
-
-			int pos = 0;
-			//my goal is to try to have a stable order with the duplicates (if we have any) so i will insert it AFTER all the keys <= insKey
-			while(pos < keys.size() && BT.keyCompare(insKey, keys.get(pos)) >= 0){
-				pos++;
-			}
-			keys.add(pos,insKey);
-
-			//ptrs have one more elements that keys. insPtr is the the ptr to the RIGHT of insKey, so it should be poiting at index(pos+1)
-			ptrs.add(pos+1, insPtr);
-
-			//decide split point (lef gets first half, right gets the second half)
-			int totalKeys = keys.size();
-			int leftCount = totalKeys/2; //keep the floor half on left
-			//right starts at leftCount
-			KeyClass sepKey = keys.get(leftCount);
-
-			//create new right index page
-			BTIndexPage newIndex = new BTIndexPage(headerPage.get_keyType());
-			PageId newIndexId = newIndex.getCurPage();
-
-			//right page P0 must be ptr[leftCount]
-			newIndex.setPrevPage(ptrs.get(leftCount));
-
-			//remove all existing entries from the old index page (we will rebuild it)
-			for (int i = slotRids.size() - 1; i >= 0; i--){
-				indexPage.deleteSortedRecord(slotRids.get(i));
-			}
-
-			//rebuild LEFT page
-			indexPage.setPrevPage(ptrs.get(0));
-			for(int i = 0; i<leftCount; i++){
-				indexPage.insertKey(keys.get(i), ptrs.get(i+1));
-			}
-
-			//build RIGHT page
-			for (int i = leftCount + 1; i<totalKeys; i++) {
-				newIndex.insertKey(keys.get(i), ptrs.get(i+1));
-			}
-
-			//unpin both pages dirty
-			unpinPage(currentPageId, true);
-			unpinPage(newIndexId, true);
-
-			//return separator upward: (smartest key on new right, pointer to new right)
-			return new KeyDataEntry(sepKey, new IndexData(newIndexId));
-
-		} else if (currentPage.getType() == NodeType.LEAF){
-			BTLeafPage leaf = new BTLeafPage(page, headerPage.get_keyType());
-
-			// usual case: leaf has space
-			int needLeaf = BT.getKeyDataLength(key, NodeType.LEAF);
-			if (leaf.available_space() >= needLeaf) {
-				leaf.insertRecord(key, rid);
-				unpinPage(currentPageId, true);
-				return null;
-			}
-
-			// -------------------- SPLIT LEAF PAGE --------------------
-			BTLeafPage newLeaf = new BTLeafPage(headerPage.get_keyType());
-			PageId newLeafId = newLeaf.getCurPage();
-
-			// link siblings: current <-> newLeaf <-> oldNext
-			PageId oldNext = leaf.getNextPage();
-			newLeaf.setNextPage(oldNext);
-			newLeaf.setPrevPage(currentPageId);
-
-			leaf.setNextPage(newLeafId);
-			if (oldNext.pid != INVALID_PAGE) {
-				BTLeafPage oldNextLeaf = new BTLeafPage(pinPage(oldNext), headerPage.get_keyType());
-				oldNextLeaf.setPrevPage(newLeafId);
-				unpinPage(oldNext, true);
-			}
-
-			// move second half of entries to newLeaf
-			int total = leaf.numberOfRecords();
-			int keep = total / 2;
-
-			RID itRid = new RID();
-			KeyDataEntry entry = leaf.getFirst(itRid);
-
-			java.util.ArrayList<RID> moveSlots = new java.util.ArrayList<>();
-			java.util.ArrayList<KeyDataEntry> moveEntries = new java.util.ArrayList<>();
-
-			int idx = 0;
-			while (entry != null) {
-				if (idx >= keep) {
-					moveSlots.add(new RID(itRid.pageNo, itRid.slotNo));
-					moveEntries.add(entry);
-				}
-				idx++;
-				entry = leaf.getNext(itRid);
-			}
-
-			// perform move: insert into newLeaf, delete from old leaf
-			for (int i = 0; i < moveEntries.size(); i++) {
-				KeyDataEntry me = moveEntries.get(i);
-				RID userRid = ((LeafData) me.data).getData();
-				newLeaf.insertRecord(me.key, userRid);
-				leaf.deleteSortedRecord(moveSlots.get(i));
-			}
-
-			// now insert the new (key,rid) into correct side (split-first policy A)
-			KeyDataEntry firstRight = newLeaf.getFirst(new RID());
-			KeyClass splitKey = firstRight.key;
-
-			if (BT.keyCompare(key, splitKey) >= 0) {
-				newLeaf.insertRecord(key, rid);
-			} else {
-				leaf.insertRecord(key, rid);
-			}
-
-			// return separator: (smallest key in new right leaf, pointer to new right leaf)
-			unpinPage(currentPageId, true);
-			unpinPage(newLeafId, true);
-			return new KeyDataEntry(splitKey, new IndexData(newLeafId));
-
-			
-		} else {
-			unpinPage(currentPageId);
-			throw new InsertException(null, "Unknown page type in _insert()");
+			scanEntry = leaf.getNext(dupRid);
 		}
-		
-	}
+
+
+
+        // Simple insert if space exists
+        if (leaf.available_space() >=
+                BT.getKeyDataLength(key, NodeType.LEAF)) {
+
+            leaf.insertRecord(key, rid);
+            return null;
+        }
+
+        /*
+         * -------- FIXED LEAF SPLIT --------
+         */
+
+        // 1️⃣ Create new leaf
+        BTLeafPage newLeaf =
+                new BTLeafPage(headerPage.get_keyType());
+        PageId newLeafId = newLeaf.getCurPage();
+
+        // 2️⃣ Collect all existing entries
+        java.util.ArrayList<KeyDataEntry> entries =
+                new java.util.ArrayList<KeyDataEntry>();
+
+        RID scanRid = new RID();
+        KeyDataEntry entry = leaf.getFirst(scanRid);
+
+        while (entry != null) {
+            entries.add(entry);
+            entry = leaf.getNext(scanRid);
+        }
+
+        // Add new key
+        entries.add(new KeyDataEntry(key, new LeafData(rid)));
+
+        // 3️⃣ Sort entries safely (no lambda)
+        java.util.Collections.sort(entries,
+                new java.util.Comparator<KeyDataEntry>() {
+                    public int compare(KeyDataEntry e1, KeyDataEntry e2) {
+                        try {
+                            return BT.keyCompare(e1.key, e2.key);
+                        } catch (Exception ex) {
+                            throw new RuntimeException(ex);
+                        }
+                    }
+                });
+
+        // 4️⃣ Clear old leaf completely
+		// Reinitialize the old leaf page (clears it safely)
+		RID deleteRid = new RID();
+		KeyDataEntry deleteEntry = leaf.getFirst(deleteRid);
+
+		java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+
+		while (deleteEntry != null) {
+			rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+			deleteEntry = leaf.getNext(deleteRid);
+		}
+
+		// delete in reverse order
+		for (int i = rids.size() - 1; i >= 0; i--) {
+			leaf.deleteSortedRecord(rids.get(i));
+		}
+
+
+
+        // 5️⃣ Split evenly
+        int split = entries.size() / 2;
+
+        for (int i = 0; i < split; i++) {
+            leaf.insertRecord(
+                    entries.get(i).key,
+                    ((LeafData) entries.get(i).data).getData());
+        }
+
+        for (int i = split; i < entries.size(); i++) {
+            newLeaf.insertRecord(
+                    entries.get(i).key,
+                    ((LeafData) entries.get(i).data).getData());
+        }
+
+        // 6️⃣ Fix sibling pointers properly
+        PageId oldNext = leaf.getNextPage();
+
+        newLeaf.setNextPage(oldNext);
+        newLeaf.setPrevPage(currentPageId);
+
+        if (oldNext.pid != INVALID_PAGE) {
+            BTLeafPage nextLeaf =
+                    new BTLeafPage(oldNext, headerPage.get_keyType());
+            nextLeaf.setPrevPage(newLeafId);
+        }
+
+        leaf.setNextPage(newLeafId);
+
+        // 7️⃣ Separator key = first key in new leaf
+        RID firstRid = new RID();
+        KeyDataEntry firstEntry = newLeaf.getFirst(firstRid);
+
+        return new KeyDataEntry(
+                firstEntry.key,
+                new IndexData(newLeafId));
+    }
+
+    /*
+     * ===============================
+     * CASE 2: INDEX
+     * ===============================
+     */
+    else {
+
+        BTIndexPage index =
+                new BTIndexPage(currentPageId, headerPage.get_keyType());
+
+        PageId childId = index.getPageNoByKey(key);
+
+        KeyDataEntry childEntry =
+                _insert(key, rid, childId);
+
+        if (childEntry == null)
+            return null;
+
+        // If space exists → simple insert
+        if (index.available_space() >=
+                BT.getKeyDataLength(childEntry.key, NodeType.INDEX)) {
+
+            index.insertKey(childEntry.key,
+                    ((IndexData) childEntry.data).getData());
+            return null;
+        }
+
+        /*
+         * -------- INDEX SPLIT --------
+         */
+
+        BTIndexPage newIndex =
+                new BTIndexPage(headerPage.get_keyType());
+        PageId newIndexId = newIndex.getCurPage();
+
+        java.util.ArrayList<KeyDataEntry> entries =
+                new java.util.ArrayList<KeyDataEntry>();
+
+        RID scanRid = new RID();
+        KeyDataEntry entry = index.getFirst(scanRid);
+
+        while (entry != null) {
+            entries.add(entry);
+            entry = index.getNext(scanRid);
+        }
+
+        // Add propagated entry
+        entries.add(childEntry);
+
+        // Sort entries
+        java.util.Collections.sort(entries,
+                new java.util.Comparator<KeyDataEntry>() {
+                    public int compare(KeyDataEntry e1, KeyDataEntry e2) {
+                        try {
+                            return BT.keyCompare(e1.key, e2.key);
+                        } catch (Exception ex) {
+                            throw new RuntimeException(ex);
+                        }
+                    }
+                });
+
+        // Clear old index
+        RID deleteRid = new RID();
+		KeyDataEntry deleteEntry = index.getFirst(deleteRid);
+
+		java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+
+		while (deleteEntry != null) {
+		    rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+		    deleteEntry = index.getNext(deleteRid);
+		}
+
+		// delete in reverse order
+		for (int i = rids.size() - 1; i >= 0; i--) {
+		    index.deleteSortedRecord(rids.get(i));
+		}
+
+        int split = entries.size() / 2;
+
+        // Middle key becomes separator
+        KeyClass sepKey = entries.get(split).key;
+
+        // Left index
+        for (int i = 0; i < split; i++) {
+            index.insertKey(
+                    entries.get(i).key,
+                    ((IndexData) entries.get(i).data).getData());
+        }
+
+        // New index leftmost pointer
+        newIndex.setPrevPage(
+                ((IndexData) entries.get(split).data).getData());
+
+        // Right index
+        for (int i = split + 1; i < entries.size(); i++) {
+            newIndex.insertKey(
+                    entries.get(i).key,
+                    ((IndexData) entries.get(i).data).getData());
+        }
+
+        return new KeyDataEntry(sepKey,
+                new IndexData(newIndexId));
+    }
+}
+
+
+
 
 	
 
