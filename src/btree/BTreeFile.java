@@ -509,7 +509,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			}
 
 			//build RIGHT page
-			for (int i = leftCount; i<totalKeys; i++) {
+			for (int i = leftCount + 1; i<totalKeys; i++) {
 				newIndex.insertKey(keys.get(i), ptrs.get(i+1));
 			}
 
@@ -588,7 +588,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 			// return separator: (smallest key in new right leaf, pointer to new right leaf)
 			unpinPage(currentPageId, true);
 			unpinPage(newLeafId, true);
-			return new KeyDataEntry(splitKey, newLeafId);
+			return new KeyDataEntry(splitKey, new IndexData(newLeafId));
 
 			
 		} else {
