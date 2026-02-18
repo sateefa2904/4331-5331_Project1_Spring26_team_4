@@ -409,223 +409,225 @@ public class BTreeFile extends IndexFile implements GlobalConst {
         IndexSearchException, UnpinPageException, LeafInsertRecException,
         ConvertException, IteratorException, IndexInsertRecException,
         KeyNotMatchException, NodeNotMatchException, InsertException 
-{
-    BTSortedPage sortedPage =
-            new BTSortedPage(currentPageId, headerPage.get_keyType());
+	{
+		BTSortedPage sortedPage =
+				new BTSortedPage(currentPageId, headerPage.get_keyType());
 
-    //***********CASE 1: leaf*************************
-    if (sortedPage.getType() == NodeType.LEAF) {
+			// [SAteefa: 2/12/2026]
 
-        BTLeafPage leaf =
-                new BTLeafPage(currentPageId, headerPage.get_keyType());
+		//***********CASE 1: leaf*************************
+		if (sortedPage.getType() == NodeType.LEAF) {
 
-        // Simple insert (duplicates allowed)
-        if (leaf.available_space() >=
-                BT.getKeyDataLength(key, NodeType.LEAF)) {
+			BTLeafPage leaf =
+					new BTLeafPage(currentPageId, headerPage.get_keyType());
 
-            leaf.insertRecord(key, rid);
-            unpinPage(currentPageId, true);
-            return null;
-        }
+			// Simple insert
+			if (leaf.available_space() >=
+					BT.getKeyDataLength(key, NodeType.LEAF)) {
 
-		// Lead splitting
+				leaf.insertRecord(key, rid);
+				unpinPage(currentPageId, true);
+				return null;
+			}
 
-        BTLeafPage newLeaf =
-                new BTLeafPage(headerPage.get_keyType());
-        PageId newLeafId = newLeaf.getCurPage();
+			// Leadf splitting
 
-        java.util.ArrayList<KeyDataEntry> entries =
-                new java.util.ArrayList<KeyDataEntry>();
+			BTLeafPage newLeaf =
+					new BTLeafPage(headerPage.get_keyType());
+			PageId newLeafId = newLeaf.getCurPage();
 
-        RID scanRid = new RID();
-        KeyDataEntry entry = leaf.getFirst(scanRid);
+			java.util.ArrayList<KeyDataEntry> entries =
+					new java.util.ArrayList<KeyDataEntry>();
 
-        while (entry != null) {
-            entries.add(entry);
-            entry = leaf.getNext(scanRid);
-        }
+			RID scanRid = new RID();
+			KeyDataEntry entry = leaf.getFirst(scanRid);
 
-        // Add new key
-        entries.add(new KeyDataEntry(key, new LeafData(rid)));
+			while (entry != null) {
+				entries.add(entry);
+				entry = leaf.getNext(scanRid);
+			}
 
-        java.util.Collections.sort(entries,
-                new java.util.Comparator<KeyDataEntry>() {
-                    public int compare(KeyDataEntry e1, KeyDataEntry e2) {
-                        try {
-                            return BT.keyCompare(e1.key, e2.key);
-                        } catch (Exception ex) {
-                            throw new RuntimeException(ex);
-                        }
-                    }
-                });
+			// Add new key
+			entries.add(new KeyDataEntry(key, new LeafData(rid)));
 
-        // Clear old leaf
-        RID deleteRid = new RID();
-        KeyDataEntry deleteEntry = leaf.getFirst(deleteRid);
+			java.util.Collections.sort(entries,
+					new java.util.Comparator<KeyDataEntry>() {
+						public int compare(KeyDataEntry e1, KeyDataEntry e2) {
+							try {
+								return BT.keyCompare(e1.key, e2.key);
+							} catch (Exception ex) {
+								throw new RuntimeException(ex);
+							}
+						}
+					});
 
-        java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+			// Clear old leaf
+			RID deleteRid = new RID();
+			KeyDataEntry deleteEntry = leaf.getFirst(deleteRid);
 
-        while (deleteEntry != null) {
-            rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
-            deleteEntry = leaf.getNext(deleteRid);
-        }
+			java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
 
-        for (int i = rids.size() - 1; i >= 0; i--) {
-            leaf.deleteSortedRecord(rids.get(i));
-        }
+			while (deleteEntry != null) {
+				rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+				deleteEntry = leaf.getNext(deleteRid);
+			}
 
-        int split = entries.size() / 2;
+			for (int i = rids.size() - 1; i >= 0; i--) {
+				leaf.deleteSortedRecord(rids.get(i));
+			}
 
-        for (int i = 0; i < split; i++) {
-            leaf.insertRecord(
-                    entries.get(i).key,
-                    ((LeafData) entries.get(i).data).getData());
-        }
+			int split = entries.size() / 2;
 
-        for (int i = split; i < entries.size(); i++) {
-            newLeaf.insertRecord(
-                    entries.get(i).key,
-                    ((LeafData) entries.get(i).data).getData());
-        }
+			for (int i = 0; i < split; i++) {
+				leaf.insertRecord(
+						entries.get(i).key,
+						((LeafData) entries.get(i).data).getData());
+			}
 
-        // Fix sibling pointers
-        PageId oldNext = leaf.getNextPage();
+			for (int i = split; i < entries.size(); i++) {
+				newLeaf.insertRecord(
+						entries.get(i).key,
+						((LeafData) entries.get(i).data).getData());
+			}
 
-        newLeaf.setNextPage(oldNext);
-        newLeaf.setPrevPage(currentPageId);
+			// Fix sibling pointers
+			PageId oldNext = leaf.getNextPage();
 
-        if (oldNext.pid != INVALID_PAGE) {
-            BTLeafPage nextLeaf =
-                    new BTLeafPage(oldNext, headerPage.get_keyType());
-            nextLeaf.setPrevPage(newLeafId);
-            unpinPage(oldNext, true);
-        }
+			newLeaf.setNextPage(oldNext);
+			newLeaf.setPrevPage(currentPageId);
 
-        leaf.setNextPage(newLeafId);
+			if (oldNext.pid != INVALID_PAGE) {
+				BTLeafPage nextLeaf =
+						new BTLeafPage(oldNext, headerPage.get_keyType());
+				nextLeaf.setPrevPage(newLeafId);
+				unpinPage(oldNext, true);
+			}
 
-        // Separator key
-        RID firstRid = new RID();
-        KeyDataEntry firstEntry = newLeaf.getFirst(firstRid);
+			leaf.setNextPage(newLeafId);
 
-        KeyDataEntry result =
-                new KeyDataEntry(firstEntry.key,
-                        new IndexData(newLeafId));
+			// Separator key
+			RID firstRid = new RID();
+			KeyDataEntry firstEntry = newLeaf.getFirst(firstRid);
 
-        // Unpin modified pages
-        unpinPage(currentPageId, true);
-        unpinPage(newLeafId, true);
+			KeyDataEntry result =
+					new KeyDataEntry(firstEntry.key,
+							new IndexData(newLeafId));
 
-        return result;
-    }
+			// Unpin modified pages
+			unpinPage(currentPageId, true);
+			unpinPage(newLeafId, true);
+
+			return result;
+		}
 
 
 
 
-	//*****************CASE 2: Index*******************
-    else {
+		//*****************CASE 2: Index*******************
+		else {
 
-        BTIndexPage index =
-                new BTIndexPage(currentPageId, headerPage.get_keyType());
+			BTIndexPage index =
+					new BTIndexPage(currentPageId, headerPage.get_keyType());
 
-        PageId childId = index.getPageNoByKey(key);
+			PageId childId = index.getPageNoByKey(key);
 
-        KeyDataEntry childEntry =
-                _insert(key, rid, childId);
+			KeyDataEntry childEntry =
+					_insert(key, rid, childId);
 
-        if (childEntry == null) {
-            unpinPage(currentPageId, false);
-            return null;
-        }
+			if (childEntry == null) {
+				unpinPage(currentPageId, false);
+				return null;
+			}
 
-        // Simple insert into index
-        if (index.available_space() >=
-                BT.getKeyDataLength(childEntry.key, NodeType.INDEX)) {
+			// Simple insert into index
+			if (index.available_space() >=
+					BT.getKeyDataLength(childEntry.key, NodeType.INDEX)) {
 
-            index.insertKey(childEntry.key,
-                    ((IndexData) childEntry.data).getData());
+				index.insertKey(childEntry.key,
+						((IndexData) childEntry.data).getData());
 
-            unpinPage(currentPageId, true);
-            return null;
-        }
+				unpinPage(currentPageId, true);
+				return null;
+			}
 
-        
-        // INDEX SPLIT
-        
+			
+			// INDEX SPLIT
+			
 
-        BTIndexPage newIndex =
-                new BTIndexPage(headerPage.get_keyType());
-        PageId newIndexId = newIndex.getCurPage();
+			BTIndexPage newIndex =
+					new BTIndexPage(headerPage.get_keyType());
+			PageId newIndexId = newIndex.getCurPage();
 
-        java.util.ArrayList<KeyDataEntry> entries =
-                new java.util.ArrayList<KeyDataEntry>();
+			java.util.ArrayList<KeyDataEntry> entries =
+					new java.util.ArrayList<KeyDataEntry>();
 
-        RID scanRid = new RID();
-        KeyDataEntry entry = index.getFirst(scanRid);
+			RID scanRid = new RID();
+			KeyDataEntry entry = index.getFirst(scanRid);
 
-        while (entry != null) {
-            entries.add(entry);
-            entry = index.getNext(scanRid);
-        }
+			while (entry != null) {
+				entries.add(entry);
+				entry = index.getNext(scanRid);
+			}
 
-        entries.add(childEntry);
+			entries.add(childEntry);
 
-        java.util.Collections.sort(entries,
-                new java.util.Comparator<KeyDataEntry>() {
-                    public int compare(KeyDataEntry e1, KeyDataEntry e2) {
-                        try {
-                            return BT.keyCompare(e1.key, e2.key);
-                        } catch (Exception ex) {
-                            throw new RuntimeException(ex);
-                        }
-                    }
-                });
+			java.util.Collections.sort(entries,
+					new java.util.Comparator<KeyDataEntry>() {
+						public int compare(KeyDataEntry e1, KeyDataEntry e2) {
+							try {
+								return BT.keyCompare(e1.key, e2.key);
+							} catch (Exception ex) {
+								throw new RuntimeException(ex);
+							}
+						}
+					});
 
-        // Clear old index
-        RID deleteRid = new RID();
-        KeyDataEntry deleteEntry = index.getFirst(deleteRid);
+			// Clear old index
+			RID deleteRid = new RID();
+			KeyDataEntry deleteEntry = index.getFirst(deleteRid);
 
-        java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+			java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
 
-        while (deleteEntry != null) {
-            rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
-            deleteEntry = index.getNext(deleteRid);
-        }
+			while (deleteEntry != null) {
+				rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+				deleteEntry = index.getNext(deleteRid);
+			}
 
-        for (int i = rids.size() - 1; i >= 0; i--) {
-            index.deleteSortedRecord(rids.get(i));
-        }
+			for (int i = rids.size() - 1; i >= 0; i--) {
+				index.deleteSortedRecord(rids.get(i));
+			}
 
-        int split = entries.size() / 2;
-        KeyClass sepKey = entries.get(split).key;
+			int split = entries.size() / 2;
+			KeyClass sepKey = entries.get(split).key;
 
-        // Left side
-        for (int i = 0; i < split; i++) {
-            index.insertKey(
-                    entries.get(i).key,
-                    ((IndexData) entries.get(i).data).getData());
-        }
+			// Left side
+			for (int i = 0; i < split; i++) {
+				index.insertKey(
+						entries.get(i).key,
+						((IndexData) entries.get(i).data).getData());
+			}
 
-        // Right side
-        newIndex.setPrevPage(
-                ((IndexData) entries.get(split).data).getData());
+			// Right side
+			newIndex.setPrevPage(
+					((IndexData) entries.get(split).data).getData());
 
-        for (int i = split + 1; i < entries.size(); i++) {
-            newIndex.insertKey(
-                    entries.get(i).key,
-                    ((IndexData) entries.get(i).data).getData());
-        }
+			for (int i = split + 1; i < entries.size(); i++) {
+				newIndex.insertKey(
+						entries.get(i).key,
+						((IndexData) entries.get(i).data).getData());
+			}
 
-        KeyDataEntry result =
-                new KeyDataEntry(sepKey,
-                        new IndexData(newIndexId));
+			KeyDataEntry result =
+					new KeyDataEntry(sepKey,
+							new IndexData(newIndexId));
 
-        //Unpin modified pages
-        unpinPage(currentPageId, true);
-        unpinPage(newIndexId, true);
+			//Unpin modified pages
+			unpinPage(currentPageId, true);
+			unpinPage(newIndexId, true);
 
-        return result;
-    }
-}
+			return result;
+		}
+	}
 
 
 
