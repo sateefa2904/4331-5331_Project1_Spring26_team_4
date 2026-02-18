@@ -404,57 +404,36 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 	}
 
 	private KeyDataEntry _insert(KeyClass key, RID rid, PageId currentPageId)
-	        throws PinPageException, IOException, ConstructPageException,
-			LeafDeleteException, ConstructPageException, DeleteRecException,
-			IndexSearchException, UnpinPageException, LeafInsertRecException,
-			ConvertException, IteratorException, IndexInsertRecException,
-			KeyNotMatchException, NodeNotMatchException, InsertException 
-	{
+        throws PinPageException, IOException, ConstructPageException,
+        LeafDeleteException, DeleteRecException,
+        IndexSearchException, UnpinPageException, LeafInsertRecException,
+        ConvertException, IteratorException, IndexInsertRecException,
+        KeyNotMatchException, NodeNotMatchException, InsertException 
+{
     BTSortedPage sortedPage =
             new BTSortedPage(currentPageId, headerPage.get_keyType());
 
-    /*
-     * ===============================
-     * CASE 1: LEAF
-     * ===============================
-     */
+    //***********CASE 1: leaf*************************
     if (sortedPage.getType() == NodeType.LEAF) {
 
         BTLeafPage leaf =
                 new BTLeafPage(currentPageId, headerPage.get_keyType());
 
-		// Check for duplicate key
-		RID dupRid = new RID();
-		KeyDataEntry scanEntry = leaf.getFirst(dupRid);
-
-		while (scanEntry != null) {
-			if (BT.keyCompare(scanEntry.key, key) == 0) {
-				// Key already exists — do not insert
-				return null;
-			}
-			scanEntry = leaf.getNext(dupRid);
-		}
-
-
-
-        // Simple insert if space exists
+        // Simple insert (duplicates allowed)
         if (leaf.available_space() >=
                 BT.getKeyDataLength(key, NodeType.LEAF)) {
 
             leaf.insertRecord(key, rid);
+            unpinPage(currentPageId, true);
             return null;
         }
 
-        /*
-         * -------- FIXED LEAF SPLIT --------
-         */
+		// Lead splitting
 
-        // 1️⃣ Create new leaf
         BTLeafPage newLeaf =
                 new BTLeafPage(headerPage.get_keyType());
         PageId newLeafId = newLeaf.getCurPage();
 
-        // 2️⃣ Collect all existing entries
         java.util.ArrayList<KeyDataEntry> entries =
                 new java.util.ArrayList<KeyDataEntry>();
 
@@ -469,7 +448,6 @@ public class BTreeFile extends IndexFile implements GlobalConst {
         // Add new key
         entries.add(new KeyDataEntry(key, new LeafData(rid)));
 
-        // 3️⃣ Sort entries safely (no lambda)
         java.util.Collections.sort(entries,
                 new java.util.Comparator<KeyDataEntry>() {
                     public int compare(KeyDataEntry e1, KeyDataEntry e2) {
@@ -481,26 +459,21 @@ public class BTreeFile extends IndexFile implements GlobalConst {
                     }
                 });
 
-        // 4️⃣ Clear old leaf completely
-		// Reinitialize the old leaf page (clears it safely)
-		RID deleteRid = new RID();
-		KeyDataEntry deleteEntry = leaf.getFirst(deleteRid);
+        // Clear old leaf
+        RID deleteRid = new RID();
+        KeyDataEntry deleteEntry = leaf.getFirst(deleteRid);
 
-		java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+        java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
 
-		while (deleteEntry != null) {
-			rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
-			deleteEntry = leaf.getNext(deleteRid);
-		}
+        while (deleteEntry != null) {
+            rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+            deleteEntry = leaf.getNext(deleteRid);
+        }
 
-		// delete in reverse order
-		for (int i = rids.size() - 1; i >= 0; i--) {
-			leaf.deleteSortedRecord(rids.get(i));
-		}
+        for (int i = rids.size() - 1; i >= 0; i--) {
+            leaf.deleteSortedRecord(rids.get(i));
+        }
 
-
-
-        // 5️⃣ Split evenly
         int split = entries.size() / 2;
 
         for (int i = 0; i < split; i++) {
@@ -515,7 +488,7 @@ public class BTreeFile extends IndexFile implements GlobalConst {
                     ((LeafData) entries.get(i).data).getData());
         }
 
-        // 6️⃣ Fix sibling pointers properly
+        // Fix sibling pointers
         PageId oldNext = leaf.getNextPage();
 
         newLeaf.setNextPage(oldNext);
@@ -525,24 +498,30 @@ public class BTreeFile extends IndexFile implements GlobalConst {
             BTLeafPage nextLeaf =
                     new BTLeafPage(oldNext, headerPage.get_keyType());
             nextLeaf.setPrevPage(newLeafId);
+            unpinPage(oldNext, true);
         }
 
         leaf.setNextPage(newLeafId);
 
-        // 7️⃣ Separator key = first key in new leaf
+        // Separator key
         RID firstRid = new RID();
         KeyDataEntry firstEntry = newLeaf.getFirst(firstRid);
 
-        return new KeyDataEntry(
-                firstEntry.key,
-                new IndexData(newLeafId));
+        KeyDataEntry result =
+                new KeyDataEntry(firstEntry.key,
+                        new IndexData(newLeafId));
+
+        // Unpin modified pages
+        unpinPage(currentPageId, true);
+        unpinPage(newLeafId, true);
+
+        return result;
     }
 
-    /*
-     * ===============================
-     * CASE 2: INDEX
-     * ===============================
-     */
+
+
+
+	//*****************CASE 2: Index*******************
     else {
 
         BTIndexPage index =
@@ -553,21 +532,25 @@ public class BTreeFile extends IndexFile implements GlobalConst {
         KeyDataEntry childEntry =
                 _insert(key, rid, childId);
 
-        if (childEntry == null)
+        if (childEntry == null) {
+            unpinPage(currentPageId, false);
             return null;
+        }
 
-        // If space exists → simple insert
+        // Simple insert into index
         if (index.available_space() >=
                 BT.getKeyDataLength(childEntry.key, NodeType.INDEX)) {
 
             index.insertKey(childEntry.key,
                     ((IndexData) childEntry.data).getData());
+
+            unpinPage(currentPageId, true);
             return null;
         }
 
-        /*
-         * -------- INDEX SPLIT --------
-         */
+        
+        // INDEX SPLIT
+        
 
         BTIndexPage newIndex =
                 new BTIndexPage(headerPage.get_keyType());
@@ -584,10 +567,8 @@ public class BTreeFile extends IndexFile implements GlobalConst {
             entry = index.getNext(scanRid);
         }
 
-        // Add propagated entry
         entries.add(childEntry);
 
-        // Sort entries
         java.util.Collections.sort(entries,
                 new java.util.Comparator<KeyDataEntry>() {
                     public int compare(KeyDataEntry e1, KeyDataEntry e2) {
@@ -601,47 +582,51 @@ public class BTreeFile extends IndexFile implements GlobalConst {
 
         // Clear old index
         RID deleteRid = new RID();
-		KeyDataEntry deleteEntry = index.getFirst(deleteRid);
+        KeyDataEntry deleteEntry = index.getFirst(deleteRid);
 
-		java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
+        java.util.ArrayList<RID> rids = new java.util.ArrayList<>();
 
-		while (deleteEntry != null) {
-		    rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
-		    deleteEntry = index.getNext(deleteRid);
-		}
+        while (deleteEntry != null) {
+            rids.add(new RID(deleteRid.pageNo, deleteRid.slotNo));
+            deleteEntry = index.getNext(deleteRid);
+        }
 
-		// delete in reverse order
-		for (int i = rids.size() - 1; i >= 0; i--) {
-		    index.deleteSortedRecord(rids.get(i));
-		}
+        for (int i = rids.size() - 1; i >= 0; i--) {
+            index.deleteSortedRecord(rids.get(i));
+        }
 
         int split = entries.size() / 2;
-
-        // Middle key becomes separator
         KeyClass sepKey = entries.get(split).key;
 
-        // Left index
+        // Left side
         for (int i = 0; i < split; i++) {
             index.insertKey(
                     entries.get(i).key,
                     ((IndexData) entries.get(i).data).getData());
         }
 
-        // New index leftmost pointer
+        // Right side
         newIndex.setPrevPage(
                 ((IndexData) entries.get(split).data).getData());
 
-        // Right index
         for (int i = split + 1; i < entries.size(); i++) {
             newIndex.insertKey(
                     entries.get(i).key,
                     ((IndexData) entries.get(i).data).getData());
         }
 
-        return new KeyDataEntry(sepKey,
-                new IndexData(newIndexId));
+        KeyDataEntry result =
+                new KeyDataEntry(sepKey,
+                        new IndexData(newIndexId));
+
+        //Unpin modified pages
+        unpinPage(currentPageId, true);
+        unpinPage(newIndexId, true);
+
+        return result;
     }
 }
+
 
 
 
